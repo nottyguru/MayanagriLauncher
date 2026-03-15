@@ -1,0 +1,7 @@
+# Ignore build folders and the massive Java runtime
+[Bb]in/
+[Oo]bj/
+
+# Ignore Visual Studio cache
+.vs/
+*.user
