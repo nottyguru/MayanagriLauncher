@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
-using System.IO.Compression;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Sockets;
@@ -15,16 +15,24 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.IO.Compression;
 using CmlLib.Core;
 using CmlLib.Core.Auth;
 using CmlLib.Core.Downloader;
 
 namespace MayanagriLauncher
 {
-    // --- THE NEW POLICY DATA MODELS ---
+    // --- BOOTSTRAP MODELS ---
+    public class BootstrapManifest
+    {
+        public string launcher_version { get; set; } = "1.0.0";
+        public string launcher_download_url { get; set; } = string.Empty;
+        public string updater_download_url { get; set; } = string.Empty;
+        public string manifest_url { get; set; } = string.Empty;
+    }
+
     public class SyncPolicies
     {
-        // Safe Default Policies if the manifest doesn't provide them
         public string[] strict_folders { get; set; } = { "mods", "config" };
         public string[] lenient_folders { get; set; } = { "resourcepacks", "shaderpacks" };
         public string[] initial_only_files { get; set; } = { "options.txt", "servers.dat" };
@@ -45,17 +53,22 @@ namespace MayanagriLauncher
         public string server_ip { get; set; } = string.Empty;
         public int server_port { get; set; } = 25565;
         public string[]? jvm_flags { get; set; }
-        public SyncPolicies policies { get; set; } = new SyncPolicies(); // Injects the policy engine
+        public SyncPolicies policies { get; set; } = new SyncPolicies();
         public ManifestFile[] files { get; set; } = Array.Empty<ManifestFile>();
     }
 
     public partial class MainWindow : Window
     {
+        // HARDCODED BOOTSTRAP URL
+        private const string BOOTSTRAP_URL = "https://raw.githubusercontent.com/nottyguru/MayanagriLauncher/main/bootstrap.json";
+
+        // ISOLATED MASTER DIRECTORY
         private readonly string mayanagriDir;
         private readonly string configPath;
 
         private string _targetServerIp = "127.0.0.1";
         private int _targetServerPort = 25565;
+        private string _dynamicManifestUrl = string.Empty;
 
         CancellationTokenSource? _cts;
         bool _isLaunching = false;
@@ -65,7 +78,7 @@ namespace MayanagriLauncher
         private static HttpClient CreateHttpClient()
         {
             var client = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
-            client.DefaultRequestHeaders.Add("User-Agent", "MayanagriLauncher/1.1");
+            client.DefaultRequestHeaders.Add("User-Agent", "MayanagriLauncher/1.2");
             return client;
         }
 
@@ -73,7 +86,8 @@ namespace MayanagriLauncher
         {
             InitializeComponent();
 
-            mayanagriDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Mayanagri");
+            // Single unified folder for EVERYTHING
+            mayanagriDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MayanagriLauncher");
             if (!Directory.Exists(mayanagriDir)) Directory.CreateDirectory(mayanagriDir);
 
             configPath = Path.Combine(mayanagriDir, "launcher_config.txt");
@@ -84,11 +98,97 @@ namespace MayanagriLauncher
             var version = Assembly.GetExecutingAssembly().GetName().Version;
             VersionText.Text = $"Client v{version?.Major}.{version?.Minor}.{version?.Build}";
 
-            this.Loaded += (s, e) => UsernameBox.Focus();
+            this.Loaded += async (s, e) =>
+            {
+                UsernameBox.Focus();
+                await InitializeBootstrapAsync(); // Check for updates immediately
+            };
 
             _ = StartServerMonitorAsync();
         }
 
+        // --- NEW: BOOTSTRAP & AUTO-UPDATE ENGINE ---
+        private async Task InitializeBootstrapAsync()
+        {
+            try
+            {
+                using (var response = await sharedClient.GetAsync(BOOTSTRAP_URL))
+                {
+                    response.EnsureSuccessStatusCode();
+                    string json = await response.Content.ReadAsStringAsync();
+                    var bootstrap = JsonSerializer.Deserialize<BootstrapManifest>(json) ?? new BootstrapManifest();
+
+                    _dynamicManifestUrl = bootstrap.manifest_url;
+
+                    // Version Check
+                    var currentVersion = Assembly.GetExecutingAssembly().GetName().Version;
+                    var latestVersion = new Version(bootstrap.launcher_version);
+
+                    if (latestVersion > currentVersion)
+                    {
+                        var result = System.Windows.MessageBox.Show(
+                            $"A new launcher update (v{bootstrap.launcher_version}) is available. Would you like to update now?",
+                            "Update Available",
+                            System.Windows.MessageBoxButton.YesNo,
+                            System.Windows.MessageBoxImage.Information);
+
+                        if (result == System.Windows.MessageBoxResult.Yes)
+                        {
+                            await TriggerSelfUpdateAsync(bootstrap);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ShowError($"Failed to connect to bootstrap server: {ex.Message}");
+            }
+        }
+
+        private async Task TriggerSelfUpdateAsync(BootstrapManifest bootstrap)
+        {
+            PlayButton.IsEnabled = false;
+            ProgressText.Text = "Preparing update...";
+            FadeInElement(ProgressArea);
+            GameProgressBar.IsIndeterminate = true;
+
+            try
+            {
+                string updaterPath = Path.Combine(mayanagriDir, "Updater.exe");
+
+                // Download the tiny Updater.exe if we don't have it
+                if (!File.Exists(updaterPath))
+                {
+                    var response = await sharedClient.GetAsync(bootstrap.updater_download_url);
+                    response.EnsureSuccessStatusCode();
+                    using (var fs = new FileStream(updaterPath, FileMode.Create))
+                    {
+                        await response.Content.CopyToAsync(fs);
+                    }
+                }
+
+                string currentExe = Process.GetCurrentProcess().MainModule?.FileName ?? "";
+                int currentPid = Process.GetCurrentProcess().Id;
+
+                // Launch Updater.exe with arguments: <PID> <DownloadURL> <TargetEXE>
+                ProcessStartInfo psi = new ProcessStartInfo
+                {
+                    FileName = updaterPath,
+                    Arguments = $"{currentPid} \"{bootstrap.launcher_download_url}\" \"{currentExe}\"",
+                    UseShellExecute = true
+                };
+
+                Process.Start(psi);
+                System.Windows.Application.Current.Shutdown(); // Exit gracefully so the updater can overwrite us
+            }
+            catch (Exception ex)
+            {
+                ShowError($"Update failed: {ex.Message}");
+                ResetUI();
+            }
+        }
+
+        // --- UPDATED: SERVER MONITOR (GREEN LIGHT) ---
         private async Task StartServerMonitorAsync()
         {
             while (true)
@@ -107,7 +207,8 @@ namespace MayanagriLauncher
 
                     Dispatcher.Invoke(() =>
                     {
-                        ServerStatusLight.Fill = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(isOnline ? "#3B82F6" : "#EF4444"));
+                        // Changed to Green (#10B981) for Online
+                        ServerStatusLight.Fill = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(isOnline ? "#10B981" : "#EF4444"));
                         ServerStatusPanel.ToolTip = isOnline ? $"Server Online: {_targetServerIp}:{_targetServerPort}" : $"Server Offline: {_targetServerIp}:{_targetServerPort}";
                     });
                 }
@@ -241,7 +342,6 @@ namespace MayanagriLauncher
             }
         }
 
-        // --- THE UPGRADED POLICY ENFORCEMENT ENGINE ---
         private async Task SyncFilesAsync(MayanagriManifest manifest, string baseDir, CancellationToken token)
         {
             Dispatcher.Invoke(() => {
@@ -249,14 +349,11 @@ namespace MayanagriLauncher
                 GameProgressBar.IsIndeterminate = true;
             });
 
-            // 1. Process and normalize policy lists
             var policies = manifest.policies ?? new SyncPolicies();
-
             var allowedPaths = manifest.files.Select(f => f.path.Replace("/", "\\")).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var initialOnlyPaths = policies.initial_only_files.Select(p => p.Replace("/", "\\")).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var ignoredPaths = policies.ignored_paths.Select(p => p.Replace("/", "\\")).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-            // 2. Strict Deletions (Only for strict_folders)
             foreach (var folder in policies.strict_folders)
             {
                 string folderPath = Path.Combine(baseDir, folder);
@@ -266,11 +363,8 @@ namespace MayanagriLauncher
                     foreach (var file in localFiles)
                     {
                         string relativePath = Path.GetRelativePath(baseDir, file);
-
-                        // Rule: Do not delete whitelisted "ignored" paths
                         if (ignoredPaths.Contains(relativePath)) continue;
 
-                        // Rule: Delete if it is not in the official manifest
                         if (!allowedPaths.Contains(relativePath))
                         {
                             File.SetAttributes(file, FileAttributes.Normal);
@@ -279,22 +373,18 @@ namespace MayanagriLauncher
                     }
                 }
             }
-            // (Note: Lenient folders are skipped here, so user-added files in those folders are perfectly safe)
 
-            // 3. Evaluate Downloads
             var filesToDownload = new List<ManifestFile>();
             foreach (var fileData in manifest.files)
             {
                 string relativePath = fileData.path.Replace("/", "\\");
                 string targetPath = Path.Combine(baseDir, relativePath);
 
-                // Rule: If it's an "Initial Only" file and it exists, completely skip it.
                 if (initialOnlyPaths.Contains(relativePath) && File.Exists(targetPath))
                 {
                     continue;
                 }
 
-                // Rule: Hash check for modifications
                 if (File.Exists(targetPath))
                 {
                     if (CalculateSHA256(targetPath) == fileData.hash) continue;
@@ -310,7 +400,6 @@ namespace MayanagriLauncher
                 GameProgressBar.Value = 0;
             });
 
-            // 4. Execute Parallel Downloads
             int totalRequired = filesToDownload.Count;
             int completedFiles = 0;
 
@@ -472,6 +561,12 @@ namespace MayanagriLauncher
                 return;
             }
 
+            if (string.IsNullOrEmpty(_dynamicManifestUrl))
+            {
+                ShowError("Bootstrap synchronization failed. Please restart the launcher.");
+                return;
+            }
+
             _isLaunching = true;
             ErrorText.Visibility = Visibility.Collapsed;
             PlayButton.Content = "CANCEL LAUNCH";
@@ -486,10 +581,9 @@ namespace MayanagriLauncher
             try
             {
                 ProgressText.Text = "Fetching server blueprint...";
-                string manifestUrl = "https://raw.githubusercontent.com/nottyguru/Mayanagri-Client/refs/heads/main/manifest.json";
                 MayanagriManifest manifest;
 
-                using (var response = await sharedClient.GetAsync(manifestUrl, _cts.Token))
+                using (var response = await sharedClient.GetAsync(_dynamicManifestUrl, _cts.Token))
                 {
                     response.EnsureSuccessStatusCode();
                     string json = await response.Content.ReadAsStringAsync(_cts.Token);
@@ -500,8 +594,6 @@ namespace MayanagriLauncher
                 {
                     throw new Exception("Server blueprint is missing required engine versions.");
                 }
-
-                VersionText.Text = $"MC {manifest.minecraft_version} / Fabric {manifest.fabric_version}";
 
                 if (!string.IsNullOrEmpty(manifest.server_ip))
                 {
