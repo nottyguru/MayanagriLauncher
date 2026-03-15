@@ -164,9 +164,9 @@
                     <TextBlock Text="M E M O R Y" Foreground="#64748B" FontSize="10" FontWeight="Bold" HorizontalAlignment="Left"/>
                     <TextBlock x:Name="RamValueText" Text="4 GB" Foreground="#3B82F6" FontSize="11" FontWeight="Bold" HorizontalAlignment="Right"/>
                 </Grid>
-                <Slider x:Name="RamSlider" Minimum="2048" Maximum="12288" TickFrequency="1024" IsSnapToTickEnabled="True" 
+                <Slider x:Name="RamSlider" Minimum="2048" Maximum="32768" TickFrequency="1024" IsSnapToTickEnabled="True" 
                         Value="4096" Margin="0,0,0,16" ValueChanged="RamSlider_ValueChanged" Cursor="Hand"
-                        Foreground="#3B82F6" TabIndex="1" ToolTip="Recommended: 4-6 GB"/>
+                        Foreground="#3B82F6" TabIndex="1" ToolTip="Recommended: 4-8 GB"/>
 
                 <Rectangle Height="1" Fill="#1A1F2E" Margin="0,0,0,12"/>
 
@@ -176,7 +176,7 @@
 
                     <Button x:Name="RepairBtn" Content="Repair client" Style="{StaticResource RepairBtnStyle}" 
                             HorizontalAlignment="Right" Click="RepairButton_Click"
-                            ToolTip="Force redownload of game files"/>
+                            ToolTip="Force redownload of game files and resets configurations"/>
                 </Grid>
 
                 <StackPanel x:Name="ProgressArea" Opacity="0" Visibility="Hidden" Margin="0,0,0,12" Height="36">
