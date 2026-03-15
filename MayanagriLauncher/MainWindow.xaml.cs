@@ -27,7 +27,9 @@ namespace MayanagriLauncher
     {
         public string launcher_version { get; set; } = "1.0.0";
         public string launcher_download_url { get; set; } = string.Empty;
+        public string launcher_hash { get; set; } = string.Empty; // NEW!
         public string updater_download_url { get; set; } = string.Empty;
+        public string updater_hash { get; set; } = string.Empty;
         public string manifest_url { get; set; } = string.Empty;
     }
 
@@ -59,10 +61,8 @@ namespace MayanagriLauncher
 
     public partial class MainWindow : Window
     {
-        // HARDCODED BOOTSTRAP URL
         private const string BOOTSTRAP_URL = "https://raw.githubusercontent.com/nottyguru/MayanagriLauncher/main/bootstrap.json";
 
-        // ISOLATED MASTER DIRECTORY
         private readonly string mayanagriDir;
         private readonly string configPath;
 
@@ -86,7 +86,6 @@ namespace MayanagriLauncher
         {
             InitializeComponent();
 
-            // Single unified folder for EVERYTHING
             mayanagriDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MayanagriLauncher");
             if (!Directory.Exists(mayanagriDir)) Directory.CreateDirectory(mayanagriDir);
 
@@ -101,13 +100,12 @@ namespace MayanagriLauncher
             this.Loaded += async (s, e) =>
             {
                 UsernameBox.Focus();
-                await InitializeBootstrapAsync(); // Check for updates immediately
+                await InitializeBootstrapAsync();
             };
 
             _ = StartServerMonitorAsync();
         }
 
-        // --- NEW: BOOTSTRAP & AUTO-UPDATE ENGINE ---
         private async Task InitializeBootstrapAsync()
         {
             try
@@ -120,7 +118,6 @@ namespace MayanagriLauncher
 
                     _dynamicManifestUrl = bootstrap.manifest_url;
 
-                    // Version Check
                     var currentVersion = Assembly.GetExecutingAssembly().GetName().Version;
                     var latestVersion = new Version(bootstrap.launcher_version);
 
@@ -141,7 +138,8 @@ namespace MayanagriLauncher
             }
             catch (Exception ex)
             {
-                ShowError($"Failed to connect to bootstrap server: {ex.Message}");
+                // UI shows error but allows playing if cached manifest works
+                ShowError($"Bootstrap offline: {ex.Message}");
             }
         }
 
@@ -156,30 +154,41 @@ namespace MayanagriLauncher
             {
                 string updaterPath = Path.Combine(mayanagriDir, "Updater.exe");
 
-                // Download the tiny Updater.exe if we don't have it
-                if (!File.Exists(updaterPath))
+                // Download safely to temp file first
+                string tempUpdater = updaterPath + ".tmp";
+                var response = await sharedClient.GetAsync(bootstrap.updater_download_url);
+                response.EnsureSuccessStatusCode();
+
+                using (var fs = new FileStream(tempUpdater, FileMode.Create, FileAccess.Write, FileShare.None))
                 {
-                    var response = await sharedClient.GetAsync(bootstrap.updater_download_url);
-                    response.EnsureSuccessStatusCode();
-                    using (var fs = new FileStream(updaterPath, FileMode.Create))
-                    {
-                        await response.Content.CopyToAsync(fs);
-                    }
+                    await response.Content.CopyToAsync(fs);
                 }
+
+                // Security Check: Verify Updater Hash to prevent hijacked repository attacks
+                if (!string.IsNullOrEmpty(bootstrap.updater_hash) && CalculateSHA256(tempUpdater) != bootstrap.updater_hash.ToLower())
+                {
+                    File.Delete(tempUpdater);
+                    throw new Exception("Security mismatch: Updater signature invalid.");
+                }
+
+                File.Move(tempUpdater, updaterPath, true);
 
                 string currentExe = Process.GetCurrentProcess().MainModule?.FileName ?? "";
                 int currentPid = Process.GetCurrentProcess().Id;
 
-                // Launch Updater.exe with arguments: <PID> <DownloadURL> <TargetEXE>
                 ProcessStartInfo psi = new ProcessStartInfo
                 {
                     FileName = updaterPath,
-                    Arguments = $"{currentPid} \"{bootstrap.launcher_download_url}\" \"{currentExe}\"",
+                    // We now pass the launcher_hash as the 4th argument to the Updater!
+                    Arguments = $"{currentPid} \"{bootstrap.launcher_download_url}\" \"{currentExe}\" \"{bootstrap.launcher_hash}\"",
                     UseShellExecute = true
                 };
 
                 Process.Start(psi);
-                System.Windows.Application.Current.Shutdown(); // Exit gracefully so the updater can overwrite us
+
+                // Brief delay to ensure Updater hooks before we terminate
+                await Task.Delay(500);
+                System.Windows.Application.Current.Shutdown();
             }
             catch (Exception ex)
             {
@@ -188,7 +197,6 @@ namespace MayanagriLauncher
             }
         }
 
-        // --- UPDATED: SERVER MONITOR (GREEN LIGHT) ---
         private async Task StartServerMonitorAsync()
         {
             while (true)
@@ -207,7 +215,6 @@ namespace MayanagriLauncher
 
                     Dispatcher.Invoke(() =>
                     {
-                        // Changed to Green (#10B981) for Online
                         ServerStatusLight.Fill = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(isOnline ? "#10B981" : "#EF4444"));
                         ServerStatusPanel.ToolTip = isOnline ? $"Server Online: {_targetServerIp}:{_targetServerPort}" : $"Server Offline: {_targetServerIp}:{_targetServerPort}";
                     });
@@ -293,6 +300,29 @@ namespace MayanagriLauncher
             element.BeginAnimation(UIElement.OpacityProperty, fadeIn);
         }
 
+        // Feature: Robust Directory Deletion (Bypasses ReadOnly locks on folders)
+        private void ForceDeleteDirectory(string targetDir)
+        {
+            if (!Directory.Exists(targetDir)) return;
+
+            string[] files = Directory.GetFiles(targetDir);
+            string[] dirs = Directory.GetDirectories(targetDir);
+
+            foreach (string file in files)
+            {
+                File.SetAttributes(file, FileAttributes.Normal);
+                File.Delete(file);
+            }
+
+            foreach (string dir in dirs)
+            {
+                ForceDeleteDirectory(dir);
+            }
+
+            File.SetAttributes(targetDir, FileAttributes.Normal);
+            Directory.Delete(targetDir, false);
+        }
+
         private void RepairButton_Click(object sender, RoutedEventArgs e)
         {
             if (_isLaunching) return;
@@ -307,22 +337,10 @@ namespace MayanagriLauncher
                 string[] folders = { "mods", "config", "shaderpacks", "resourcepacks" };
                 foreach (var folder in folders)
                 {
-                    string path = Path.Combine(mayanagriDir, folder);
-                    if (Directory.Exists(path))
-                    {
-                        var files = Directory.GetFiles(path, "*.*", SearchOption.AllDirectories);
-                        foreach (var file in files) File.SetAttributes(file, FileAttributes.Normal);
-                        Directory.Delete(path, true);
-                    }
+                    ForceDeleteDirectory(Path.Combine(mayanagriDir, folder));
                 }
 
-                string versionsPath = Path.Combine(mayanagriDir, "versions");
-                if (Directory.Exists(versionsPath))
-                {
-                    var files = Directory.GetFiles(versionsPath, "*.*", SearchOption.AllDirectories);
-                    foreach (var file in files) File.SetAttributes(file, FileAttributes.Normal);
-                    Directory.Delete(versionsPath, true);
-                }
+                ForceDeleteDirectory(Path.Combine(mayanagriDir, "versions"));
 
                 System.Windows.MessageBox.Show("Cleanup complete! Click PLAY to begin the fresh installation.", "Repair", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Information);
             }
@@ -380,6 +398,7 @@ namespace MayanagriLauncher
                 string relativePath = fileData.path.Replace("/", "\\");
                 string targetPath = Path.Combine(baseDir, relativePath);
 
+                // Policy: Initial-only files preserve player settings. If it exists, skip hash check.
                 if (initialOnlyPaths.Contains(relativePath) && File.Exists(targetPath))
                 {
                     continue;
@@ -418,14 +437,17 @@ namespace MayanagriLauncher
                         if (!string.IsNullOrEmpty(targetDir) && !Directory.Exists(targetDir))
                             Directory.CreateDirectory(targetDir);
 
+                        // Safety: Atomic downloading via Temp file to prevent IO corruption
+                        string tempPath = targetPath + ".tmp";
                         using (var response = await sharedClient.GetAsync(fileData.url, HttpCompletionOption.ResponseHeadersRead, token))
                         {
                             response.EnsureSuccessStatusCode();
-                            using (var fs = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                            using (var fs = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
                             {
                                 await response.Content.CopyToAsync(fs, token);
                             }
                         }
+                        File.Move(tempPath, targetPath, true);
 
                         int currentCount = Interlocked.Increment(ref completedFiles);
                         Dispatcher.Invoke(() => {
@@ -435,11 +457,8 @@ namespace MayanagriLauncher
                     }
                     catch
                     {
-                        if (File.Exists(targetPath))
-                        {
-                            File.SetAttributes(targetPath, FileAttributes.Normal);
-                            File.Delete(targetPath);
-                        }
+                        string tempPath = targetPath + ".tmp";
+                        if (File.Exists(tempPath)) File.Delete(tempPath);
                         throw;
                     }
                     finally
@@ -452,12 +471,16 @@ namespace MayanagriLauncher
             }
         }
 
+        // Feature: Safe Version parsing for Snapshot / Pre-releases
         private int GetRequiredJavaVersion(string mcVersion)
         {
-            Version v = new Version(mcVersion);
-            if (v.Minor >= 21 || (v.Minor == 20 && v.Build >= 5)) return 21;
-            if (v.Minor >= 17) return 17;
-            return 8;
+            string cleanVersion = mcVersion.Split('-')[0]; // Safely removes strings like "-pre1"
+            if (Version.TryParse(cleanVersion, out Version v))
+            {
+                if (v.Minor >= 21 || (v.Minor == 20 && v.Build >= 5)) return 21;
+                if (v.Minor >= 17) return 17;
+            }
+            return 8; // Safest fallback
         }
 
         private async Task<string> EnsureJavaAsync(int javaVersion, CancellationToken token)
@@ -553,6 +576,18 @@ namespace MayanagriLauncher
             });
         }
 
+        // Feature: Deterministic Offline UUIDs (Preserves player stats in non-premium mode)
+        private string GenerateOfflineUUID(string username)
+        {
+            using (MD5 md5 = MD5.Create())
+            {
+                byte[] hash = md5.ComputeHash(System.Text.Encoding.UTF8.GetBytes("OfflinePlayer:" + username));
+                hash[6] = (byte)(hash[6] & 0x0f | 0x30); // Version 3 UUID
+                hash[8] = (byte)(hash[8] & 0x3f | 0x80); // Variant 1
+                return new Guid(hash).ToString("N");
+            }
+        }
+
         private async void PlayButton_Click(object sender, RoutedEventArgs e)
         {
             if (_isLaunching)
@@ -636,7 +671,7 @@ namespace MayanagriLauncher
                 var session = new MSession
                 {
                     Username = UsernameBox.Text,
-                    UUID = Guid.NewGuid().ToString("N"),
+                    UUID = GenerateOfflineUUID(UsernameBox.Text), // Use deterministic UUID
                     AccessToken = "access_token",
                     UserType = "Legacy"
                 };
@@ -700,7 +735,12 @@ namespace MayanagriLauncher
             {
                 _cts?.Dispose();
                 _cts = null;
-                ResetUI();
+
+                Dispatcher.Invoke(() =>
+                {
+                    GameProgressBar.IsIndeterminate = false;
+                    ResetUI();
+                });
             }
         }
 
@@ -709,7 +749,6 @@ namespace MayanagriLauncher
             _isLaunching = false;
             ProgressArea.Visibility = Visibility.Hidden;
             ProgressArea.Opacity = 0;
-            GameProgressBar.IsIndeterminate = false;
             PlayButton.Content = "PLAY";
             ValidateUsername();
 
