@@ -1,8 +1,8 @@
 {
   "launcher_version": "1.2.0",
   "launcher_download_url": "https://github.com/nottyguru/MayanagriLauncher/releases/download/v1.2.0/MayanagriLauncher.exe",
-  "launcher_hash": "eb0c1849f5cce4fa0d2f0de06cf1fc105440e6705267073e898d8babd4e2e3c0",
+  "launcher_hash": "fe4460ed6d9fd398efa357d4f7dd1f94ed54c7752159dbbc24965275538e9870",
   "updater_download_url": "https://raw.githubusercontent.com/nottyguru/MayanagriLauncher/main/Updater.exe",
-  "updater_hash": "8da5a8e2f648a883cbcc5a6f67ebae2c5953aced9758cf2309fb61cf193e1ca4",
+  "updater_hash": "85130d8f54455fb8151cbbdf7cb8e84a0f0648a3d90d7c7cfb3a71cce61297dd",
   "manifest_url": "https://raw.githubusercontent.com/nottyguru/Mayanagri-Client/main/manifest.json"
 }
