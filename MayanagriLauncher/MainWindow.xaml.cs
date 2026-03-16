@@ -42,27 +42,36 @@ namespace MayanagriLauncher
         private LauncherConfig _launcherConfig = new LauncherConfig();
         private bool _isLaunching = false;
 
-        // Auto-updater variables
-        private string _pendingUpdateUrl = string.Empty;
+        // Auto-updater variables (Change this to 1.0.1 when building the update)
         private readonly string _currentVersion = "1.0.1";
+        private string _pendingUpdateUrl = string.Empty;
 
         private static readonly HttpClient sharedClient = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
 
         public MainWindow()
         {
-            InitializeComponent();
-            mayanagriDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MayanagriLauncher");
-            if (!Directory.Exists(mayanagriDir)) Directory.CreateDirectory(mayanagriDir);
-            configPath = Path.Combine(mayanagriDir, "launcher_config.json");
-
-            LoadConfig();
-            ValidateUsername();
-
-            this.Loaded += async (s, e) =>
+            try
             {
-                UsernameBox.Focus();
-                await CheckForUpdatesAsync();
-            };
+                InitializeComponent();
+                mayanagriDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MayanagriLauncher");
+                if (!Directory.Exists(mayanagriDir)) Directory.CreateDirectory(mayanagriDir);
+                configPath = Path.Combine(mayanagriDir, "launcher_config.json");
+
+                LoadConfig();
+                ValidateUsername();
+
+                this.Loaded += async (s, e) =>
+                {
+                    UsernameBox.Focus();
+                    await CheckForUpdatesAsync();
+                };
+            }
+            catch (Exception ex)
+            {
+                // Prevents silent crashes by exposing the exact startup error
+                MessageBox.Show($"Critical Startup Error:\n{ex.Message}\n\n{ex.StackTrace}", "Startup Failure", MessageBoxButton.OK, MessageBoxImage.Error);
+                Application.Current.Shutdown();
+            }
         }
 
         private void Window_MouseDown(object sender, MouseButtonEventArgs e)
@@ -212,11 +221,11 @@ del ""%~f0""";
                 };
 
                 Process.Start(psi);
-                System.Windows.Application.Current.Shutdown();
+                Application.Current.Shutdown();
             }
             catch (Exception ex)
             {
-                System.Windows.MessageBox.Show($"Update failed: {ex.Message}", "Update Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show($"Update failed: {ex.Message}", "Update Error", MessageBoxButton.OK, MessageBoxImage.Error);
                 _pendingUpdateUrl = string.Empty;
                 ResetUI();
             }
@@ -302,11 +311,11 @@ del ""%~f0""";
                 var process = await launcher.CreateProcessAsync(targetVersion, launchOptions);
 
                 process.Start();
-                System.Windows.Application.Current.Shutdown();
+                Application.Current.Shutdown();
             }
             catch (Exception ex)
             {
-                System.Windows.MessageBox.Show($"Launch sequence failed: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show($"Launch sequence failed: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
                 ResetUI();
             }
         }
